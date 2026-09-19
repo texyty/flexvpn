@@ -34,4 +34,5 @@ jobs:
           H1_API_URL: ${{ secrets.H1_API_URL }}
           H1_INBOUND: ${{ secrets.H1_INBOUND }}
           ADMIN_USERNAME: ${{ secrets.ADMIN_USERNAME }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: python main.py

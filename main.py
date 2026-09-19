@@ -1,7 +1,8 @@
-import asyncio
+﻿import asyncio
 import logging
 import os
 import sqlite3
+import re
 import aiohttp
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, F, Router
@@ -18,11 +19,51 @@ ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "takurwa")
 H1_API_URL   = os.getenv("H1_API_URL", "http://lt1.h1cloud.net:25392/api")
 H1_API_TOKEN = os.environ["H1_API_TOKEN"]
 H1_INBOUND   = os.getenv("H1_INBOUND", "custom-vless-25393")
+DATABASE_URL  = os.getenv("DATABASE_URL", "").strip()
+
+
+class _CompatCursor:
+    def __init__(self, cursor):
+        self._cursor = cursor
+
+    def execute(self, query, params=()):
+        if DATABASE_URL:
+            query = query.replace("?", "%s")
+            query = query.replace("INSERT OR IGNORE INTO promo_usage", "INSERT INTO promo_usage")
+            if query.lstrip().upper().startswith("ALTER TABLE"):
+                query = query.replace(" ADD COLUMN ", " ADD COLUMN IF NOT EXISTS ", 1)
+            if query.startswith("INSERT OR REPLACE INTO promocodes"):
+                query = ("INSERT INTO promocodes (code, amount, uses_left) VALUES (%s,%s,%s) "
+                         "ON CONFLICT (code) DO UPDATE SET amount=EXCLUDED.amount, uses_left=EXCLUDED.uses_left")
+            if query.startswith("INSERT INTO promo_usage"):
+                query += " ON CONFLICT (user_id, code) DO NOTHING"
+        return self._cursor.execute(query, params)
+
+    def __getattr__(self, name):
+        return getattr(self._cursor, name)
+
+
+class _CompatConnection:
+    def __init__(self, connection):
+        self._connection = connection
+
+    def cursor(self):
+        return _CompatCursor(self._connection.cursor())
+
+    def __getattr__(self, name):
+        return getattr(self._connection, name)
+
+
+def connect_db():
+    if DATABASE_URL:
+        import psycopg
+        return _CompatConnection(psycopg.connect(DATABASE_URL))
+    return _CompatConnection(connect_db())
 
 router = Router()
 
 
-# ───────────────────────── Глобальный обработчик ошибок ─────────────────────────
+# в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ Р“Р»РѕР±Р°Р»СЊРЅС‹Р№ РѕР±СЂР°Р±РѕС‚С‡РёРє РѕС€РёР±РѕРє в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
 
 @router.errors()
 async def error_handler(event: ErrorEvent):
@@ -37,13 +78,13 @@ async def error_handler(event: ErrorEvent):
     return False
 
 
-# ───────────────────────── Имя клиента ─────────────────────────
+# в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ РРјСЏ РєР»РёРµРЅС‚Р° в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
 
 def make_client_name(user_id: int) -> str:
     return f"u{user_id}"
 
 
-# ───────────────────────── H1VLESS API ─────────────────────────
+# в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ H1VLESS API в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
 
 async def h1_get_client(user_id: int) -> dict | None:
     headers = {"Authorization": f"Bearer {H1_API_TOKEN}"}
@@ -301,10 +342,10 @@ def calc_expire_date(user_id: int, days: int) -> datetime:
     return datetime.now() + timedelta(days=days)
 
 
-# ───────────────────────── БД ─────────────────────────
+# в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ Р‘Р” в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
 
 def init_db():
-    con = sqlite3.connect("flexvpn.db")
+    con = connect_db()
     cur = con.cursor()
     cur.execute("""
         CREATE TABLE IF NOT EXISTS users (
@@ -335,7 +376,7 @@ def init_db():
     ]:
         try:
             cur.execute(f"ALTER TABLE users ADD COLUMN {col} {definition}")
-        except sqlite3.OperationalError:
+        except Exception:
             pass
 
     cur.execute("""
@@ -346,7 +387,7 @@ def init_db():
         )
     """)
 
-    # Таблица использованных промокодов (один юзер = один раз)
+    # РўР°Р±Р»РёС†Р° РёСЃРїРѕР»СЊР·РѕРІР°РЅРЅС‹С… РїСЂРѕРјРѕРєРѕРґРѕРІ (РѕРґРёРЅ СЋР·РµСЂ = РѕРґРёРЅ СЂР°Р·)
     cur.execute("""
         CREATE TABLE IF NOT EXISTS promo_usage (
             user_id INTEGER,
@@ -360,7 +401,7 @@ def init_db():
 
 
 def get_user(user_id: int) -> dict | None:
-    con = sqlite3.connect("flexvpn.db")
+    con = connect_db()
     cur = con.cursor()
     cur.execute("SELECT * FROM users WHERE user_id=?", (user_id,))
     row = cur.fetchone()
@@ -387,7 +428,7 @@ def get_user(user_id: int) -> dict | None:
 
 
 def get_all_users() -> list:
-    con = sqlite3.connect("flexvpn.db")
+    con = connect_db()
     cur = con.cursor()
     cur.execute("SELECT * FROM users")
     rows = cur.fetchall()
@@ -415,7 +456,7 @@ def get_all_users() -> list:
 
 
 def get_stats() -> dict:
-    con = sqlite3.connect("flexvpn.db")
+    con = connect_db()
     cur = con.cursor()
     cur.execute("SELECT COUNT(*) FROM users")
     total_users = cur.fetchone()[0]
@@ -432,7 +473,7 @@ def get_stats() -> dict:
 
 
 def has_used_promo(user_id: int, code: str) -> bool:
-    con = sqlite3.connect("flexvpn.db")
+    con = connect_db()
     cur = con.cursor()
     cur.execute("SELECT 1 FROM promo_usage WHERE user_id=? AND code=?", (user_id, code))
     result = cur.fetchone()
@@ -441,7 +482,7 @@ def has_used_promo(user_id: int, code: str) -> bool:
 
 
 def mark_promo_used(user_id: int, code: str):
-    con = sqlite3.connect("flexvpn.db")
+    con = connect_db()
     cur = con.cursor()
     cur.execute(
         "INSERT OR IGNORE INTO promo_usage (user_id, code) VALUES (?,?)",
@@ -452,7 +493,7 @@ def mark_promo_used(user_id: int, code: str):
 
 
 def set_notified(user_id: int, field: str):
-    con = sqlite3.connect("flexvpn.db")
+    con = connect_db()
     cur = con.cursor()
     cur.execute(f"UPDATE users SET {field}=1 WHERE user_id=?", (user_id,))
     con.commit()
@@ -460,7 +501,7 @@ def set_notified(user_id: int, field: str):
 
 
 def reset_notifications(user_id: int):
-    con = sqlite3.connect("flexvpn.db")
+    con = connect_db()
     cur = con.cursor()
     cur.execute("UPDATE users SET notified_3d=0, notified_0d=0 WHERE user_id=?", (user_id,))
     con.commit()
@@ -468,7 +509,7 @@ def reset_notifications(user_id: int):
 
 
 def ensure_user(user_id: int, username: str = "", referrer_id: int = None) -> bool:
-    con = sqlite3.connect("flexvpn.db")
+    con = connect_db()
     cur = con.cursor()
     cur.execute("SELECT user_id FROM users WHERE user_id=?", (user_id,))
     exists = cur.fetchone()
@@ -487,7 +528,7 @@ def ensure_user(user_id: int, username: str = "", referrer_id: int = None) -> bo
 
 
 def set_main_msg_id(user_id: int, msg_id: int):
-    con = sqlite3.connect("flexvpn.db")
+    con = connect_db()
     cur = con.cursor()
     cur.execute("UPDATE users SET main_msg_id=? WHERE user_id=?", (msg_id, user_id))
     con.commit()
@@ -495,7 +536,7 @@ def set_main_msg_id(user_id: int, msg_id: int):
 
 
 def set_agreed(user_id: int):
-    con = sqlite3.connect("flexvpn.db")
+    con = connect_db()
     cur = con.cursor()
     cur.execute("UPDATE users SET agreed=1 WHERE user_id=?", (user_id,))
     con.commit()
@@ -503,7 +544,7 @@ def set_agreed(user_id: int):
 
 
 def set_balance(user_id: int, balance: int):
-    con = sqlite3.connect("flexvpn.db")
+    con = connect_db()
     cur = con.cursor()
     cur.execute("UPDATE users SET balance=? WHERE user_id=?", (balance, user_id))
     con.commit()
@@ -511,7 +552,7 @@ def set_balance(user_id: int, balance: int):
 
 
 def increment_refs(referrer_id: int):
-    con = sqlite3.connect("flexvpn.db")
+    con = connect_db()
     cur = con.cursor()
     cur.execute("UPDATE users SET refs = refs + 1 WHERE user_id=?", (referrer_id,))
     con.commit()
@@ -519,7 +560,7 @@ def increment_refs(referrer_id: int):
 
 
 def add_ref_earned(referrer_id: int, amount: int):
-    con = sqlite3.connect("flexvpn.db")
+    con = connect_db()
     cur = con.cursor()
     cur.execute(
         "UPDATE users SET ref_earned = ref_earned + ?, balance = balance + ? WHERE user_id=?",
@@ -530,7 +571,7 @@ def add_ref_earned(referrer_id: int, amount: int):
 
 
 def set_sub(user_id: int, name: str, expire: str, link: str, sub_url: str = None):
-    con = sqlite3.connect("flexvpn.db")
+    con = connect_db()
     cur = con.cursor()
     cur.execute(
         "UPDATE users SET sub_name=?, sub_expire=?, sub_link=?, sub_url=? WHERE user_id=?",
@@ -541,7 +582,7 @@ def set_sub(user_id: int, name: str, expire: str, link: str, sub_url: str = None
 
 
 def clear_sub(user_id: int):
-    con = sqlite3.connect("flexvpn.db")
+    con = connect_db()
     cur = con.cursor()
     cur.execute(
         "UPDATE users SET sub_name=NULL, sub_expire=NULL, sub_link=NULL, sub_url=NULL WHERE user_id=?",
@@ -552,7 +593,7 @@ def clear_sub(user_id: int):
 
 
 def get_promo(code: str) -> dict | None:
-    con = sqlite3.connect("flexvpn.db")
+    con = connect_db()
     cur = con.cursor()
     cur.execute("SELECT code, amount, uses_left FROM promocodes WHERE code=?", (code,))
     row = cur.fetchone()
@@ -563,7 +604,7 @@ def get_promo(code: str) -> dict | None:
 
 
 def create_promo(code: str, amount: int, uses: int):
-    con = sqlite3.connect("flexvpn.db")
+    con = connect_db()
     cur = con.cursor()
     cur.execute(
         "INSERT OR REPLACE INTO promocodes (code, amount, uses_left) VALUES (?,?,?)",
@@ -574,7 +615,7 @@ def create_promo(code: str, amount: int, uses: int):
 
 
 def use_promo(code: str):
-    con = sqlite3.connect("flexvpn.db")
+    con = connect_db()
     cur = con.cursor()
     cur.execute("UPDATE promocodes SET uses_left = uses_left - 1 WHERE code=?", (code,))
     cur.execute("DELETE FROM promocodes WHERE uses_left <= 0")
@@ -584,7 +625,7 @@ def use_promo(code: str):
 
 def find_user_by_username(username: str) -> dict | None:
     clean = username.lstrip("@").strip()
-    con   = sqlite3.connect("flexvpn.db")
+    con   = connect_db()
     cur   = con.cursor()
     cur.execute("SELECT * FROM users WHERE LOWER(username)=LOWER(?)", (clean,))
     row = cur.fetchone()
@@ -600,7 +641,7 @@ def find_user_by_username(username: str) -> dict | None:
     return None
 
 
-# ───────────────────────── FSM ─────────────────────────
+# в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ FSM в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
 
 class Form(StatesGroup):
     topup_amount        = State()
@@ -618,7 +659,7 @@ class Form(StatesGroup):
     admin_del_username  = State()
 
 
-# ───────────────────────── Хелперы ─────────────────────────
+# в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ РҐРµР»РїРµСЂС‹ в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
 
 def btn(text: str, cbd: str) -> InlineKeyboardButton:
     return InlineKeyboardButton(text=text, callback_data=cbd)
@@ -627,25 +668,25 @@ def btn(text: str, cbd: str) -> InlineKeyboardButton:
 def format_key_text(vless_key: str | None, sub_link: str | None) -> str:
     if sub_link:
         return (
-            f"🔗 *Ссылка на подписку:*\n"
+            f"рџ”— *РЎСЃС‹Р»РєР° РЅР° РїРѕРґРїРёСЃРєСѓ:*\n"
             f"`{sub_link}`\n\n"
-            f"📲 Как добавить:\n"
-            f"• *Hiddify* → + → Вставить ссылку\n"
-            f"• *V2RayTun* → + → Импорт по ссылке\n"
-            f"• *Streisand* → + → Вставить URL\n"
-            f"• *V2Box* → + → Импорт из буфера"
+            f"рџ“І РљР°Рє РґРѕР±Р°РІРёС‚СЊ:\n"
+            f"вЂў *Hiddify* в†’ + в†’ Р’СЃС‚Р°РІРёС‚СЊ СЃСЃС‹Р»РєСѓ\n"
+            f"вЂў *V2RayTun* в†’ + в†’ РРјРїРѕСЂС‚ РїРѕ СЃСЃС‹Р»РєРµ\n"
+            f"вЂў *Streisand* в†’ + в†’ Р’СЃС‚Р°РІРёС‚СЊ URL\n"
+            f"вЂў *V2Box* в†’ + в†’ РРјРїРѕСЂС‚ РёР· Р±СѓС„РµСЂР°"
         )
     elif vless_key:
         return (
-            f"🔑 *Ваш ключ подключения:*\n"
+            f"рџ”‘ *Р’Р°С€ РєР»СЋС‡ РїРѕРґРєР»СЋС‡РµРЅРёСЏ:*\n"
             f"`{vless_key}`\n\n"
-            f"📲 Как подключиться:\n"
-            f"• *Hiddify* → + → Добавить ссылку\n"
-            f"• *V2RayTun* → + → Импорт из буфера\n"
-            f"• *Streisand* → + → Вставить\n"
-            f"• *V2Box* → + → Вставить ссылку"
+            f"рџ“І РљР°Рє РїРѕРґРєР»СЋС‡РёС‚СЊСЃСЏ:\n"
+            f"вЂў *Hiddify* в†’ + в†’ Р”РѕР±Р°РІРёС‚СЊ СЃСЃС‹Р»РєСѓ\n"
+            f"вЂў *V2RayTun* в†’ + в†’ РРјРїРѕСЂС‚ РёР· Р±СѓС„РµСЂР°\n"
+            f"вЂў *Streisand* в†’ + в†’ Р’СЃС‚Р°РІРёС‚СЊ\n"
+            f"вЂў *V2Box* в†’ + в†’ Р’СЃС‚Р°РІРёС‚СЊ СЃСЃС‹Р»РєСѓ"
         )
-    return "❌ Ключ не получен. Обратитесь в поддержку: @takurwa"
+    return "вќЊ РљР»СЋС‡ РЅРµ РїРѕР»СѓС‡РµРЅ. РћР±СЂР°С‚РёС‚РµСЃСЊ РІ РїРѕРґРґРµСЂР¶РєСѓ: @takurwa"
 
 
 def is_admin(user) -> bool:
@@ -653,7 +694,7 @@ def is_admin(user) -> bool:
 
 
 async def safe_delete(bot: Bot, chat_id: int, msg_id: int):
-    """Безопасно удаляет сообщение"""
+    """Р‘РµР·РѕРїР°СЃРЅРѕ СѓРґР°Р»СЏРµС‚ СЃРѕРѕР±С‰РµРЅРёРµ"""
     try:
         await bot.delete_message(chat_id, msg_id)
     except Exception:
@@ -661,7 +702,7 @@ async def safe_delete(bot: Bot, chat_id: int, msg_id: int):
 
 
 async def safe_edit(message, text: str, reply_markup=None, parse_mode: str = "Markdown"):
-    """Безопасно редактирует сообщение"""
+    """Р‘РµР·РѕРїР°СЃРЅРѕ СЂРµРґР°РєС‚РёСЂСѓРµС‚ СЃРѕРѕР±С‰РµРЅРёРµ"""
     try:
         await message.edit_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
         return True
@@ -669,82 +710,82 @@ async def safe_edit(message, text: str, reply_markup=None, parse_mode: str = "Ma
         return False
 
 
-# ───────────────────────── Клавиатуры ─────────────────────────
+# в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ РљР»Р°РІРёР°С‚СѓСЂС‹ в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
 
 def get_welcome_menu():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🛡 Политика конфиденциальности ↗", url="https://telegra.ph/POLITIKA-KONFIDENCIALNOSTI-08-12-99")],
-        [InlineKeyboardButton(text="📋 Пользовательское соглашение ↗", url="https://telegra.ph/PUBLICHNAYA-OFERTA-08-12-15")],
-        [InlineKeyboardButton(text="💰 Условия возврата ↗",            url="https://t.me/takurwa")],
-        [btn("✅ Я ознакомлен и принимаю условия", "agree")],
+        [InlineKeyboardButton(text="рџ›Ў РџРѕР»РёС‚РёРєР° РєРѕРЅС„РёРґРµРЅС†РёР°Р»СЊРЅРѕСЃС‚Рё в†—", url="https://telegra.ph/POLITIKA-KONFIDENCIALNOSTI-08-12-99")],
+        [InlineKeyboardButton(text="рџ“‹ РџРѕР»СЊР·РѕРІР°С‚РµР»СЊСЃРєРѕРµ СЃРѕРіР»Р°С€РµРЅРёРµ в†—", url="https://telegra.ph/PUBLICHNAYA-OFERTA-08-12-15")],
+        [InlineKeyboardButton(text="рџ’° РЈСЃР»РѕРІРёСЏ РІРѕР·РІСЂР°С‚Р° в†—",            url="https://t.me/takurwa")],
+        [btn("вњ… РЇ РѕР·РЅР°РєРѕРјР»РµРЅ Рё РїСЂРёРЅРёРјР°СЋ СѓСЃР»РѕРІРёСЏ", "agree")],
     ])
 
 
 def get_main_menu():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [btn("🛒 Купить подписку", "buy_sub")],
-        [btn("📊 Моя подписка",    "my_sub")],
-        [btn("💰 Баланс", "balance"), btn("🎫 Промокод", "promocode")],
-        [btn("👥 Пригласить друзей", "ref")],
-        [InlineKeyboardButton(text="🆘 Поддержка ↗", url="https://t.me/takurwa")],
-        [btn("📄 Документы", "docs")],
+        [btn("рџ›’ РљСѓРїРёС‚СЊ РїРѕРґРїРёСЃРєСѓ", "buy_sub")],
+        [btn("рџ“Љ РњРѕСЏ РїРѕРґРїРёСЃРєР°",    "my_sub")],
+        [btn("рџ’° Р‘Р°Р»Р°РЅСЃ", "balance"), btn("рџЋ« РџСЂРѕРјРѕРєРѕРґ", "promocode")],
+        [btn("рџ‘Ґ РџСЂРёРіР»Р°СЃРёС‚СЊ РґСЂСѓР·РµР№", "ref")],
+        [InlineKeyboardButton(text="рџ† РџРѕРґРґРµСЂР¶РєР° в†—", url="https://t.me/takurwa")],
+        [btn("рџ“„ Р”РѕРєСѓРјРµРЅС‚С‹", "docs")],
     ])
 
 
 def get_devices_menu():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [btn("📱 3 устройства",  "devices_3")],
-        [btn("📱📱 6 устройств", "devices_6")],
-        [btn("◀️ Назад",        "main_menu")],
+        [btn("рџ“± 3 СѓСЃС‚СЂРѕР№СЃС‚РІР°",  "devices_3")],
+        [btn("рџ“±рџ“± 6 СѓСЃС‚СЂРѕР№СЃС‚РІ", "devices_6")],
+        [btn("в—ЂпёЏ РќР°Р·Р°Рґ",        "main_menu")],
     ])
 
 
 def get_admin_menu():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [btn("💸 Выдать деньги",      "admin_give")],
-        [btn("🎫 Создать промокод",    "admin_create_promo")],
-        [btn("✅ Выдать подписку",     "admin_give_sub")],
-        [btn("❌ Удалить подписку",    "admin_del_sub")],
-        [btn("📱 Изменить устройства", "admin_change_dev")],
-        [btn("📊 Статистика",         "admin_stats")],
-        [btn("◀️ Назад в меню",       "main_menu")],
+        [btn("рџ’ё Р’С‹РґР°С‚СЊ РґРµРЅСЊРіРё",      "admin_give")],
+        [btn("рџЋ« РЎРѕР·РґР°С‚СЊ РїСЂРѕРјРѕРєРѕРґ",    "admin_create_promo")],
+        [btn("вњ… Р’С‹РґР°С‚СЊ РїРѕРґРїРёСЃРєСѓ",     "admin_give_sub")],
+        [btn("вќЊ РЈРґР°Р»РёС‚СЊ РїРѕРґРїРёСЃРєСѓ",    "admin_del_sub")],
+        [btn("рџ“± РР·РјРµРЅРёС‚СЊ СѓСЃС‚СЂРѕР№СЃС‚РІР°", "admin_change_dev")],
+        [btn("рџ“Љ РЎС‚Р°С‚РёСЃС‚РёРєР°",         "admin_stats")],
+        [btn("в—ЂпёЏ РќР°Р·Р°Рґ РІ РјРµРЅСЋ",       "main_menu")],
     ])
 
 
 def get_docs_menu():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🛡 Политика конфиденциальности ↗", url="https://telegra.ph/POLITIKA-KONFIDENCIALNOSTI-08-12-99")],
-        [InlineKeyboardButton(text="📋 Пользовательское соглашение ↗", url="https://telegra.ph/PUBLICHNAYA-OFERTA-08-12-15")],
-        [InlineKeyboardButton(text="💰 Условия возврата ↗",            url="https://t.me/takurwa")],
-        [btn("🔒 Политика бота", "bot_policy")],
-        [btn("◀️ Назад в меню",  "main_menu")],
+        [InlineKeyboardButton(text="рџ›Ў РџРѕР»РёС‚РёРєР° РєРѕРЅС„РёРґРµРЅС†РёР°Р»СЊРЅРѕСЃС‚Рё в†—", url="https://telegra.ph/POLITIKA-KONFIDENCIALNOSTI-08-12-99")],
+        [InlineKeyboardButton(text="рџ“‹ РџРѕР»СЊР·РѕРІР°С‚РµР»СЊСЃРєРѕРµ СЃРѕРіР»Р°С€РµРЅРёРµ в†—", url="https://telegra.ph/PUBLICHNAYA-OFERTA-08-12-15")],
+        [InlineKeyboardButton(text="рџ’° РЈСЃР»РѕРІРёСЏ РІРѕР·РІСЂР°С‚Р° в†—",            url="https://t.me/takurwa")],
+        [btn("рџ”’ РџРѕР»РёС‚РёРєР° Р±РѕС‚Р°", "bot_policy")],
+        [btn("в—ЂпёЏ РќР°Р·Р°Рґ РІ РјРµРЅСЋ",  "main_menu")],
     ])
 
 
 TARIFFS = {
-    "3_1d": ("1 день (пробный)",     29,   1, 3),
-    "3_1m": ("1 месяц",              99,  30, 3),
-    "3_3m": ("3 месяца",            219,  90, 3),
-    "3_6m": ("6 месяцев",           449, 180, 3),
-    "3_1y": ("1 год",               739, 365, 3),
-    "6_1m": ("1 месяц (6 устр.)",   119,  30, 6),
-    "6_3m": ("3 месяца (6 устр.)",  239,  90, 6),
-    "6_6m": ("6 месяцев (6 устр.)", 479, 180, 6),
-    "6_1y": ("1 год (6 устр.)",     849, 365, 6),
+    "3_1d": ("1 РґРµРЅСЊ (РїСЂРѕР±РЅС‹Р№)",     29,   1, 3),
+    "3_1m": ("1 РјРµСЃСЏС†",              99,  30, 3),
+    "3_3m": ("3 РјРµСЃСЏС†Р°",            219,  90, 3),
+    "3_6m": ("6 РјРµСЃСЏС†РµРІ",           449, 180, 3),
+    "3_1y": ("1 РіРѕРґ",               739, 365, 3),
+    "6_1m": ("1 РјРµСЃСЏС† (6 СѓСЃС‚СЂ.)",   119,  30, 6),
+    "6_3m": ("3 РјРµСЃСЏС†Р° (6 СѓСЃС‚СЂ.)",  239,  90, 6),
+    "6_6m": ("6 РјРµСЃСЏС†РµРІ (6 СѓСЃС‚СЂ.)", 479, 180, 6),
+    "6_1y": ("1 РіРѕРґ (6 СѓСЃС‚СЂ.)",     849, 365, 6),
 }
 
 REF_BONUS_PERCENT = 20
 
 MAIN_TEXT = (
-    "💎 *FLEX VPN*\n\n"
-    "🌐 От 5 серверов в разных странах\n"
-    "🛡 Без логов подключений\n"
-    "🔒 Надёжное подключение\n"
-    "🚀 Высокая скорость соединения"
+    "рџ’Ћ *FLEX VPN*\n\n"
+    "рџЊђ РћС‚ 5 СЃРµСЂРІРµСЂРѕРІ РІ СЂР°Р·РЅС‹С… СЃС‚СЂР°РЅР°С…\n"
+    "рџ›Ў Р‘РµР· Р»РѕРіРѕРІ РїРѕРґРєР»СЋС‡РµРЅРёР№\n"
+    "рџ”’ РќР°РґС‘Р¶РЅРѕРµ РїРѕРґРєР»СЋС‡РµРЅРёРµ\n"
+    "рџљЂ Р’С‹СЃРѕРєР°СЏ СЃРєРѕСЂРѕСЃС‚СЊ СЃРѕРµРґРёРЅРµРЅРёСЏ"
 )
 
 
-# ───────────────────────── Проверка подписок ─────────────────────────
+# в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ РџСЂРѕРІРµСЂРєР° РїРѕРґРїРёСЃРѕРє в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
 
 async def check_subscriptions(bot: Bot):
     while True:
@@ -767,13 +808,13 @@ async def check_subscriptions(bot: Bot):
                 if days_left == 3 and not user["notified_3d"]:
                     try:
                         kb = InlineKeyboardMarkup(inline_keyboard=[
-                            [btn("🔄 Продлить подписку", "buy_sub")]
+                            [btn("рџ”„ РџСЂРѕРґР»РёС‚СЊ РїРѕРґРїРёСЃРєСѓ", "buy_sub")]
                         ])
                         await bot.send_message(
                             user_id,
-                            f"⚠️ *Ваша подписка истекает через 3 дня!*\n\n"
-                            f"📅 Дата окончания: *{expire.strftime('%d.%m.%Y')}*\n\n"
-                            f"Продлите подписку чтобы не потерять доступ.",
+                            f"вљ пёЏ *Р’Р°С€Р° РїРѕРґРїРёСЃРєР° РёСЃС‚РµРєР°РµС‚ С‡РµСЂРµР· 3 РґРЅСЏ!*\n\n"
+                            f"рџ“… Р”Р°С‚Р° РѕРєРѕРЅС‡Р°РЅРёСЏ: *{expire.strftime('%d.%m.%Y')}*\n\n"
+                            f"РџСЂРѕРґР»РёС‚Рµ РїРѕРґРїРёСЃРєСѓ С‡С‚РѕР±С‹ РЅРµ РїРѕС‚РµСЂСЏС‚СЊ РґРѕСЃС‚СѓРї.",
                             reply_markup=kb,
                             parse_mode="Markdown",
                         )
@@ -786,12 +827,12 @@ async def check_subscriptions(bot: Bot):
                 elif days_left == 0 and not user["notified_0d"]:
                     try:
                         kb = InlineKeyboardMarkup(inline_keyboard=[
-                            [btn("🔄 Продлить подписку", "buy_sub")]
+                            [btn("рџ”„ РџСЂРѕРґР»РёС‚СЊ РїРѕРґРїРёСЃРєСѓ", "buy_sub")]
                         ])
                         await bot.send_message(
                             user_id,
-                            f"🔴 *Ваша подписка истекает сегодня!*\n\n"
-                            f"Продлите прямо сейчас чтобы не потерять доступ.",
+                            f"рџ”ґ *Р’Р°С€Р° РїРѕРґРїРёСЃРєР° РёСЃС‚РµРєР°РµС‚ СЃРµРіРѕРґРЅСЏ!*\n\n"
+                            f"РџСЂРѕРґР»РёС‚Рµ РїСЂСЏРјРѕ СЃРµР№С‡Р°СЃ С‡С‚РѕР±С‹ РЅРµ РїРѕС‚РµСЂСЏС‚СЊ РґРѕСЃС‚СѓРї.",
                             reply_markup=kb,
                             parse_mode="Markdown",
                         )
@@ -807,13 +848,13 @@ async def check_subscriptions(bot: Bot):
                         clear_sub(user_id)
                         reset_notifications(user_id)
                         kb = InlineKeyboardMarkup(inline_keyboard=[
-                            [btn("🛒 Купить подписку", "buy_sub")]
+                            [btn("рџ›’ РљСѓРїРёС‚СЊ РїРѕРґРїРёСЃРєСѓ", "buy_sub")]
                         ])
                         await bot.send_message(
                             user_id,
-                            f"❌ *Ваша подписка истекла!*\n\n"
-                            f"Доступ к VPN отключён.\n"
-                            f"Оформите новую подписку чтобы продолжить.",
+                            f"вќЊ *Р’Р°С€Р° РїРѕРґРїРёСЃРєР° РёСЃС‚РµРєР»Р°!*\n\n"
+                            f"Р”РѕСЃС‚СѓРї Рє VPN РѕС‚РєР»СЋС‡С‘РЅ.\n"
+                            f"РћС„РѕСЂРјРёС‚Рµ РЅРѕРІСѓСЋ РїРѕРґРїРёСЃРєСѓ С‡С‚РѕР±С‹ РїСЂРѕРґРѕР»Р¶РёС‚СЊ.",
                             reply_markup=kb,
                             parse_mode="Markdown",
                         )
@@ -830,7 +871,7 @@ async def check_subscriptions(bot: Bot):
         await asyncio.sleep(3600)
 
 
-# ───────────────────────── Хендлеры ─────────────────────────
+# в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ РҐРµРЅРґР»РµСЂС‹ в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
 
 @router.message(CommandStart())
 async def cmd_start(message: Message, command: CommandObject, bot: Bot):
@@ -863,13 +904,13 @@ async def cmd_start(message: Message, command: CommandObject, bot: Bot):
     try:
         if not user["agreed"]:
             msg = await message.answer(
-                "👋 *Добро пожаловать в FLEX VPN!*\n\n"
-                "Перед началом работы ознакомьтесь с документами сервиса.\n\n"
-                "📄 Прочитайте:\n"
-                "• Политику конфиденциальности\n"
-                "• Пользовательское соглашение\n"
-                "• Условия возврата\n\n"
-                "После ознакомления нажмите кнопку ниже 👇",
+                "рџ‘‹ *Р”РѕР±СЂРѕ РїРѕР¶Р°Р»РѕРІР°С‚СЊ РІ FLEX VPN!*\n\n"
+                "РџРµСЂРµРґ РЅР°С‡Р°Р»РѕРј СЂР°Р±РѕС‚С‹ РѕР·РЅР°РєРѕРјСЊС‚РµСЃСЊ СЃ РґРѕРєСѓРјРµРЅС‚Р°РјРё СЃРµСЂРІРёСЃР°.\n\n"
+                "рџ“„ РџСЂРѕС‡РёС‚Р°Р№С‚Рµ:\n"
+                "вЂў РџРѕР»РёС‚РёРєСѓ РєРѕРЅС„РёРґРµРЅС†РёР°Р»СЊРЅРѕСЃС‚Рё\n"
+                "вЂў РџРѕР»СЊР·РѕРІР°С‚РµР»СЊСЃРєРѕРµ СЃРѕРіР»Р°С€РµРЅРёРµ\n"
+                "вЂў РЈСЃР»РѕРІРёСЏ РІРѕР·РІСЂР°С‚Р°\n\n"
+                "РџРѕСЃР»Рµ РѕР·РЅР°РєРѕРјР»РµРЅРёСЏ РЅР°Р¶РјРёС‚Рµ РєРЅРѕРїРєСѓ РЅРёР¶Рµ рџ‘‡",
                 reply_markup=get_welcome_menu(),
                 parse_mode="Markdown",
             )
@@ -901,7 +942,7 @@ async def admin_cmd(message: Message, bot: Bot):
 
     try:
         msg = await message.answer(
-            "👑 *Админ-панель FLEX VPN*",
+            "рџ‘‘ *РђРґРјРёРЅ-РїР°РЅРµР»СЊ FLEX VPN*",
             reply_markup=get_admin_menu(),
             parse_mode="Markdown",
         )
@@ -923,13 +964,13 @@ async def stats_cmd(message: Message, bot: Bot):
     user_id = message.from_user.id
     user    = get_user(user_id)
     text    = (
-        f"📊 *Статистика FLEX VPN*\n\n"
-        f"👤 Всего пользователей: *{stats['total_users']}*\n"
-        f"✅ Активных подписок: *{stats['active_subs']}*\n"
-        f"💰 Выплачено рефералам: *{stats['total_earned']}₽*"
+        f"рџ“Љ *РЎС‚Р°С‚РёСЃС‚РёРєР° FLEX VPN*\n\n"
+        f"рџ‘¤ Р’СЃРµРіРѕ РїРѕР»СЊР·РѕРІР°С‚РµР»РµР№: *{stats['total_users']}*\n"
+        f"вњ… РђРєС‚РёРІРЅС‹С… РїРѕРґРїРёСЃРѕРє: *{stats['active_subs']}*\n"
+        f"рџ’° Р’С‹РїР»Р°С‡РµРЅРѕ СЂРµС„РµСЂР°Р»Р°Рј: *{stats['total_earned']}в‚Ѕ*"
     )
 
-    # Удаляем старое сообщение и отправляем новое
+    # РЈРґР°Р»СЏРµРј СЃС‚Р°СЂРѕРµ СЃРѕРѕР±С‰РµРЅРёРµ Рё РѕС‚РїСЂР°РІР»СЏРµРј РЅРѕРІРѕРµ
     if user and user["main_msg_id"]:
         await safe_delete(bot, message.chat.id, user["main_msg_id"])
 
@@ -948,14 +989,14 @@ async def stats_cmd(message: Message, bot: Bot):
 @router.callback_query(F.data == "admin_stats")
 async def admin_stats_cb(callback: CallbackQuery):
     if not is_admin(callback.from_user):
-        await callback.answer("⛔ Нет доступа.", show_alert=True)
+        await callback.answer("в›” РќРµС‚ РґРѕСЃС‚СѓРїР°.", show_alert=True)
         return
     stats = get_stats()
     text  = (
-        f"📊 *Статистика FLEX VPN*\n\n"
-        f"👤 Всего пользователей: *{stats['total_users']}*\n"
-        f"✅ Активных подписок: *{stats['active_subs']}*\n"
-        f"💰 Выплачено рефералам: *{stats['total_earned']}₽*"
+        f"рџ“Љ *РЎС‚Р°С‚РёСЃС‚РёРєР° FLEX VPN*\n\n"
+        f"рџ‘¤ Р’СЃРµРіРѕ РїРѕР»СЊР·РѕРІР°С‚РµР»РµР№: *{stats['total_users']}*\n"
+        f"вњ… РђРєС‚РёРІРЅС‹С… РїРѕРґРїРёСЃРѕРє: *{stats['active_subs']}*\n"
+        f"рџ’° Р’С‹РїР»Р°С‡РµРЅРѕ СЂРµС„РµСЂР°Р»Р°Рј: *{stats['total_earned']}в‚Ѕ*"
     )
     await safe_edit(callback.message, text, reply_markup=get_admin_menu())
     await callback.answer()
@@ -966,7 +1007,7 @@ async def agree_cb(callback: CallbackQuery):
     ensure_user(callback.from_user.id, callback.from_user.username or "")
     set_agreed(callback.from_user.id)
     await safe_edit(callback.message, MAIN_TEXT, reply_markup=get_main_menu())
-    await callback.answer("✅ Добро пожаловать!")
+    await callback.answer("вњ… Р”РѕР±СЂРѕ РїРѕР¶Р°Р»РѕРІР°С‚СЊ!")
 
 
 @router.callback_query(F.data == "main_menu")
@@ -979,8 +1020,8 @@ async def main_menu_cb(callback: CallbackQuery):
 async def buy_sub_cb(callback: CallbackQuery):
     await safe_edit(
         callback.message,
-        "📱 *Выберите количество устройств*\n\n"
-        "Подписка будет работать одновременно на выбранном числе устройств.",
+        "рџ“± *Р’С‹Р±РµСЂРёС‚Рµ РєРѕР»РёС‡РµСЃС‚РІРѕ СѓСЃС‚СЂРѕР№СЃС‚РІ*\n\n"
+        "РџРѕРґРїРёСЃРєР° Р±СѓРґРµС‚ СЂР°Р±РѕС‚Р°С‚СЊ РѕРґРЅРѕРІСЂРµРјРµРЅРЅРѕ РЅР° РІС‹Р±СЂР°РЅРЅРѕРј С‡РёСЃР»Рµ СѓСЃС‚СЂРѕР№СЃС‚РІ.",
         reply_markup=get_devices_menu(),
     )
     await callback.answer()
@@ -996,32 +1037,32 @@ async def select_devices_cb(callback: CallbackQuery):
 
     if dev == 3:
         text = (
-            f"📅 *Выберите период подписки*\n\n"
-            f"💰 Ваш баланс: *{balance}₽*\n"
-            f"📱 Устройств: *3*\n"
-            f"📊 Трафик: *150 ГБ/мес*"
+            f"рџ“… *Р’С‹Р±РµСЂРёС‚Рµ РїРµСЂРёРѕРґ РїРѕРґРїРёСЃРєРё*\n\n"
+            f"рџ’° Р’Р°С€ Р±Р°Р»Р°РЅСЃ: *{balance}в‚Ѕ*\n"
+            f"рџ“± РЈСЃС‚СЂРѕР№СЃС‚РІ: *3*\n"
+            f"рџ“Љ РўСЂР°С„РёРє: *150 Р“Р‘/РјРµСЃ*"
         )
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [btn("🟢 1 день (пробный) — 29₽", "tar_3_1d")],
-            [btn("🔵 1 месяц — 99₽",           "tar_3_1m")],
-            [btn("🟣 3 месяца — 219₽",         "tar_3_3m")],
-            [btn("🟠 6 месяцев — 449₽",        "tar_3_6m")],
-            [btn("🏆 1 год — 739₽",            "tar_3_1y")],
-            [btn("◀️ Назад",                   "buy_sub")],
+            [btn("рџџў 1 РґРµРЅСЊ (РїСЂРѕР±РЅС‹Р№) вЂ” 29в‚Ѕ", "tar_3_1d")],
+            [btn("рџ”µ 1 РјРµСЃСЏС† вЂ” 99в‚Ѕ",           "tar_3_1m")],
+            [btn("рџџЈ 3 РјРµСЃСЏС†Р° вЂ” 219в‚Ѕ",         "tar_3_3m")],
+            [btn("рџџ  6 РјРµСЃСЏС†РµРІ вЂ” 449в‚Ѕ",        "tar_3_6m")],
+            [btn("рџЏ† 1 РіРѕРґ вЂ” 739в‚Ѕ",            "tar_3_1y")],
+            [btn("в—ЂпёЏ РќР°Р·Р°Рґ",                   "buy_sub")],
         ])
     else:
         text = (
-            f"📅 *Выберите период подписки*\n\n"
-            f"💰 Ваш баланс: *{balance}₽*\n"
-            f"📱 Устройств: *6*\n"
-            f"📊 Трафик: *300 ГБ/мес*"
+            f"рџ“… *Р’С‹Р±РµСЂРёС‚Рµ РїРµСЂРёРѕРґ РїРѕРґРїРёСЃРєРё*\n\n"
+            f"рџ’° Р’Р°С€ Р±Р°Р»Р°РЅСЃ: *{balance}в‚Ѕ*\n"
+            f"рџ“± РЈСЃС‚СЂРѕР№СЃС‚РІ: *6*\n"
+            f"рџ“Љ РўСЂР°С„РёРє: *300 Р“Р‘/РјРµСЃ*"
         )
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [btn("🔵 1 месяц — 119₽",   "tar_6_1m")],
-            [btn("🟣 3 месяца — 239₽",  "tar_6_3m")],
-            [btn("🟠 6 месяцев — 479₽", "tar_6_6m")],
-            [btn("🏆 1 год — 849₽",     "tar_6_1y")],
-            [btn("◀️ Назад",            "buy_sub")],
+            [btn("рџ”µ 1 РјРµСЃСЏС† вЂ” 119в‚Ѕ",   "tar_6_1m")],
+            [btn("рџџЈ 3 РјРµСЃСЏС†Р° вЂ” 239в‚Ѕ",  "tar_6_3m")],
+            [btn("рџџ  6 РјРµСЃСЏС†РµРІ вЂ” 479в‚Ѕ", "tar_6_6m")],
+            [btn("рџЏ† 1 РіРѕРґ вЂ” 849в‚Ѕ",     "tar_6_1y")],
+            [btn("в—ЂпёЏ РќР°Р·Р°Рґ",            "buy_sub")],
         ])
 
     await safe_edit(callback.message, text, reply_markup=kb)
@@ -1037,7 +1078,7 @@ async def process_tariff_cb(callback: CallbackQuery, bot: Bot):
     tariff_code = parts[1] + "_" + parts[2]
 
     if tariff_code not in TARIFFS:
-        await callback.answer("❌ Неизвестный тариф.", show_alert=True)
+        await callback.answer("вќЊ РќРµРёР·РІРµСЃС‚РЅС‹Р№ С‚Р°СЂРёС„.", show_alert=True)
         return
 
     name, price, days, devices = TARIFFS[tariff_code]
@@ -1046,15 +1087,15 @@ async def process_tariff_cb(callback: CallbackQuery, bot: Bot):
 
     if balance < price:
         await callback.answer(
-            f"❌ Недостаточно средств!\nНужно {price}₽, у вас {balance}₽.",
+            f"вќЊ РќРµРґРѕСЃС‚Р°С‚РѕС‡РЅРѕ СЃСЂРµРґСЃС‚РІ!\nРќСѓР¶РЅРѕ {price}в‚Ѕ, Сѓ РІР°СЃ {balance}в‚Ѕ.",
             show_alert=True,
         )
         return
 
-    await callback.answer("⏳ Создаём подписку...")
+    await callback.answer("вЏі РЎРѕР·РґР°С‘Рј РїРѕРґРїРёСЃРєСѓ...")
     await safe_edit(
         callback.message,
-        "⏳ *Создаём вашу подписку...*\n\nПожалуйста подождите.",
+        "вЏі *РЎРѕР·РґР°С‘Рј РІР°С€Сѓ РїРѕРґРїРёСЃРєСѓ...*\n\nРџРѕР¶Р°Р»СѓР№СЃС‚Р° РїРѕРґРѕР¶РґРёС‚Рµ.",
     )
 
     vless_key, sub_link = await h1_get_or_create_client(user_id, days, devices)
@@ -1062,8 +1103,8 @@ async def process_tariff_cb(callback: CallbackQuery, bot: Bot):
     if not vless_key and not sub_link:
         await safe_edit(
             callback.message,
-            "❌ Ошибка при создании подписки.\nОбратитесь в поддержку: @takurwa",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[btn("◀️ Назад в меню", "main_menu")]]),
+            "вќЊ РћС€РёР±РєР° РїСЂРё СЃРѕР·РґР°РЅРёРё РїРѕРґРїРёСЃРєРё.\nРћР±СЂР°С‚РёС‚РµСЃСЊ РІ РїРѕРґРґРµСЂР¶РєСѓ: @takurwa",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[btn("в—ЂпёЏ РќР°Р·Р°Рґ РІ РјРµРЅСЋ", "main_menu")]]),
         )
         return
 
@@ -1083,8 +1124,8 @@ async def process_tariff_cb(callback: CallbackQuery, bot: Bot):
             try:
                 await bot.send_message(
                     referrer_id,
-                    f"🎉 По вашей реферальной ссылке совершена покупка!\n"
-                    f"💰 Вам начислено *{bonus}₽* ({REF_BONUS_PERCENT}% от {price}₽)",
+                    f"рџЋ‰ РџРѕ РІР°С€РµР№ СЂРµС„РµСЂР°Р»СЊРЅРѕР№ СЃСЃС‹Р»РєРµ СЃРѕРІРµСЂС€РµРЅР° РїРѕРєСѓРїРєР°!\n"
+                    f"рџ’° Р’Р°Рј РЅР°С‡РёСЃР»РµРЅРѕ *{bonus}в‚Ѕ* ({REF_BONUS_PERCENT}% РѕС‚ {price}в‚Ѕ)",
                     parse_mode="Markdown",
                 )
             except TelegramForbiddenError:
@@ -1093,20 +1134,20 @@ async def process_tariff_cb(callback: CallbackQuery, bot: Bot):
                 logging.error(f"Ref bonus notify error: {e}")
 
     key_text = format_key_text(vless_key, sub_link)
-    title    = "🔄 *Подписка продлена!*" if is_renewal else "✅ *Подписка активирована!*"
+    title    = "рџ”„ *РџРѕРґРїРёСЃРєР° РїСЂРѕРґР»РµРЅР°!*" if is_renewal else "вњ… *РџРѕРґРїРёСЃРєР° Р°РєС‚РёРІРёСЂРѕРІР°РЅР°!*"
 
     text = (
         f"{title}\n\n"
-        f"📅 {name}\n"
-        f"📱 Устройств: *{devices}*\n"
-        f"⏳ Действует до: *{expire_date.strftime('%d.%m.%Y')}*\n"
-        f"💰 Списано: *{price}₽*\n"
-        f"💳 Остаток: *{new_balance}₽*\n\n"
+        f"рџ“… {name}\n"
+        f"рџ“± РЈСЃС‚СЂРѕР№СЃС‚РІ: *{devices}*\n"
+        f"вЏі Р”РµР№СЃС‚РІСѓРµС‚ РґРѕ: *{expire_date.strftime('%d.%m.%Y')}*\n"
+        f"рџ’° РЎРїРёСЃР°РЅРѕ: *{price}в‚Ѕ*\n"
+        f"рџ’і РћСЃС‚Р°С‚РѕРє: *{new_balance}в‚Ѕ*\n\n"
         f"{key_text}"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [btn("📋 Скопировать ключ", "copy_key")],
-        [btn("◀️ Назад в меню",    "main_menu")],
+        [btn("рџ“‹ РЎРєРѕРїРёСЂРѕРІР°С‚СЊ РєР»СЋС‡", "copy_key")],
+        [btn("в—ЂпёЏ РќР°Р·Р°Рґ РІ РјРµРЅСЋ",    "main_menu")],
     ])
     await safe_edit(callback.message, text, reply_markup=kb)
 
@@ -1119,34 +1160,34 @@ async def my_sub_cb(callback: CallbackQuery):
 
     if not user["sub_name"]:
         text = (
-            "📊 *Моя подписка*\n\n"
-            "У вас пока нет активной подписки.\n"
-            "Оформите её в разделе «Купить подписку»."
+            "рџ“Љ *РњРѕСЏ РїРѕРґРїРёСЃРєР°*\n\n"
+            "РЈ РІР°СЃ РїРѕРєР° РЅРµС‚ Р°РєС‚РёРІРЅРѕР№ РїРѕРґРїРёСЃРєРё.\n"
+            "РћС„РѕСЂРјРёС‚Рµ РµС‘ РІ СЂР°Р·РґРµР»Рµ В«РљСѓРїРёС‚СЊ РїРѕРґРїРёСЃРєСѓВ»."
         )
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [btn("🛒 Купить подписку", "buy_sub")],
-            [btn("◀️ Назад в меню",   "main_menu")],
+            [btn("рџ›’ РљСѓРїРёС‚СЊ РїРѕРґРїРёСЃРєСѓ", "buy_sub")],
+            [btn("в—ЂпёЏ РќР°Р·Р°Рґ РІ РјРµРЅСЋ",   "main_menu")],
         ])
     else:
         try:
             expire    = datetime.strptime(user["sub_expire"], "%d.%m.%Y %H:%M")
             days_left = (expire - datetime.now()).days
-            days_text = f"⏳ Осталось: *{days_left} дн.*\n" if days_left >= 0 else "🔴 Подписка истекла\n"
+            days_text = f"вЏі РћСЃС‚Р°Р»РѕСЃСЊ: *{days_left} РґРЅ.*\n" if days_left >= 0 else "рџ”ґ РџРѕРґРїРёСЃРєР° РёСЃС‚РµРєР»Р°\n"
         except Exception:
             days_text = ""
 
         key_text = format_key_text(user.get("sub_link"), user.get("sub_url"))
         text = (
-            f"📊 *Моя подписка*\n\n"
-            f"📅 Тариф: *{user['sub_name']}*\n"
-            f"📆 До: *{user['sub_expire']}*\n"
+            f"рџ“Љ *РњРѕСЏ РїРѕРґРїРёСЃРєР°*\n\n"
+            f"рџ“… РўР°СЂРёС„: *{user['sub_name']}*\n"
+            f"рџ“† Р”Рѕ: *{user['sub_expire']}*\n"
             f"{days_text}\n"
             f"{key_text}"
         )
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [btn("📋 Скопировать ключ",  "copy_key")],
-            [btn("🔄 Продлить подписку", "buy_sub")],
-            [btn("◀️ Назад в меню",     "main_menu")],
+            [btn("рџ“‹ РЎРєРѕРїРёСЂРѕРІР°С‚СЊ РєР»СЋС‡",  "copy_key")],
+            [btn("рџ”„ РџСЂРѕРґР»РёС‚СЊ РїРѕРґРїРёСЃРєСѓ", "buy_sub")],
+            [btn("в—ЂпёЏ РќР°Р·Р°Рґ РІ РјРµРЅСЋ",     "main_menu")],
         ])
 
     await safe_edit(callback.message, text, reply_markup=kb)
@@ -1155,7 +1196,7 @@ async def my_sub_cb(callback: CallbackQuery):
 
 @router.callback_query(F.data == "copy_key")
 async def copy_key_cb(callback: CallbackQuery):
-    await callback.answer("Ключ скопирован в буфер обмена!", show_alert=True)
+    await callback.answer("РљР»СЋС‡ СЃРєРѕРїРёСЂРѕРІР°РЅ РІ Р±СѓС„РµСЂ РѕР±РјРµРЅР°!", show_alert=True)
 
 
 @router.callback_query(F.data == "balance")
@@ -1164,10 +1205,10 @@ async def balance_cb(callback: CallbackQuery):
     ensure_user(user_id, callback.from_user.username or "")
     user = get_user(user_id)
     kb   = InlineKeyboardMarkup(inline_keyboard=[
-        [btn("💳 Пополнить баланс", "topup")],
-        [btn("◀️ Назад в меню",    "main_menu")],
+        [btn("рџ’і РџРѕРїРѕР»РЅРёС‚СЊ Р±Р°Р»Р°РЅСЃ", "topup")],
+        [btn("в—ЂпёЏ РќР°Р·Р°Рґ РІ РјРµРЅСЋ",    "main_menu")],
     ])
-    await safe_edit(callback.message, f"💰 Ваш баланс: *{user['balance']}₽*", reply_markup=kb)
+    await safe_edit(callback.message, f"рџ’° Р’Р°С€ Р±Р°Р»Р°РЅСЃ: *{user['balance']}в‚Ѕ*", reply_markup=kb)
     await callback.answer()
 
 
@@ -1175,7 +1216,7 @@ async def balance_cb(callback: CallbackQuery):
 async def topup_cb(callback: CallbackQuery, state: FSMContext):
     await safe_edit(
         callback.message,
-        "💳 *Введите сумму пополнения в рублях (например: 100):*\n\nИли нажмите /start чтобы отменить.",
+        "рџ’і *Р’РІРµРґРёС‚Рµ СЃСѓРјРјСѓ РїРѕРїРѕР»РЅРµРЅРёСЏ РІ СЂСѓР±Р»СЏС… (РЅР°РїСЂРёРјРµСЂ: 100):*\n\nРР»Рё РЅР°Р¶РјРёС‚Рµ /start С‡С‚РѕР±С‹ РѕС‚РјРµРЅРёС‚СЊ.",
     )
     await state.set_state(Form.topup_amount)
     await callback.answer()
@@ -1193,15 +1234,15 @@ async def process_topup_amount(message: Message, state: FSMContext, bot: Bot):
         if amount <= 0:
             raise ValueError
     except ValueError:
-        await bot.send_message(user_id, "Введите положительное число:")
+        await bot.send_message(user_id, "Р’РІРµРґРёС‚Рµ РїРѕР»РѕР¶РёС‚РµР»СЊРЅРѕРµ С‡РёСЃР»Рѕ:")
         return
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💳 Оплатить ↗", url="https://t.me/durov")],
-        [btn("◀️ Назад в меню", "main_menu")],
+        [InlineKeyboardButton(text="рџ’і РћРїР»Р°С‚РёС‚СЊ в†—", url="https://t.me/durov")],
+        [btn("в—ЂпёЏ РќР°Р·Р°Рґ РІ РјРµРЅСЋ", "main_menu")],
     ])
     user = get_user(user_id)
-    text = f"💳 *Пополнение баланса на {amount}₽*\n\nНажмите «Оплатить» — баланс пополнится после оплаты."
+    text = f"рџ’і *РџРѕРїРѕР»РЅРµРЅРёРµ Р±Р°Р»Р°РЅСЃР° РЅР° {amount}в‚Ѕ*\n\nРќР°Р¶РјРёС‚Рµ В«РћРїР»Р°С‚РёС‚СЊВ» вЂ” Р±Р°Р»Р°РЅСЃ РїРѕРїРѕР»РЅРёС‚СЃСЏ РїРѕСЃР»Рµ РѕРїР»Р°С‚С‹."
 
     if user and user["main_msg_id"]:
         try:
@@ -1225,7 +1266,7 @@ async def process_topup_amount(message: Message, state: FSMContext, bot: Bot):
 async def promocode_cb(callback: CallbackQuery, state: FSMContext):
     await safe_edit(
         callback.message,
-        "🎫 *Введите промокод сообщением:*\n\nИли нажмите /start чтобы отменить.",
+        "рџЋ« *Р’РІРµРґРёС‚Рµ РїСЂРѕРјРѕРєРѕРґ СЃРѕРѕР±С‰РµРЅРёРµРј:*\n\nРР»Рё РЅР°Р¶РјРёС‚Рµ /start С‡С‚РѕР±С‹ РѕС‚РјРµРЅРёС‚СЊ.",
     )
     await state.set_state(Form.promo_code)
     await callback.answer()
@@ -1243,19 +1284,19 @@ async def process_promo_code(message: Message, state: FSMContext, bot: Bot):
     user = get_user(user_id)
 
     if has_used_promo(user_id, code):
-        result_text = "❌ Вы уже использовали этот промокод."
+        result_text = "вќЊ Р’С‹ СѓР¶Рµ РёСЃРїРѕР»СЊР·РѕРІР°Р»Рё СЌС‚РѕС‚ РїСЂРѕРјРѕРєРѕРґ."
     else:
         promo = get_promo(code)
         if not promo:
-            result_text = "❌ Промокод не найден или уже использован."
+            result_text = "вќЊ РџСЂРѕРјРѕРєРѕРґ РЅРµ РЅР°Р№РґРµРЅ РёР»Рё СѓР¶Рµ РёСЃРїРѕР»СЊР·РѕРІР°РЅ."
         else:
             ensure_user(user_id, message.from_user.username or "")
             set_balance(user_id, user["balance"] + promo["amount"])
             use_promo(code)
             mark_promo_used(user_id, code)
-            result_text = f"✅ Промокод активирован!\n💰 Зачислено *{promo['amount']}₽*"
+            result_text = f"вњ… РџСЂРѕРјРѕРєРѕРґ Р°РєС‚РёРІРёСЂРѕРІР°РЅ!\nрџ’° Р—Р°С‡РёСЃР»РµРЅРѕ *{promo['amount']}в‚Ѕ*"
 
-    kb = InlineKeyboardMarkup(inline_keyboard=[[btn("◀️ Назад в меню", "main_menu")]])
+    kb = InlineKeyboardMarkup(inline_keyboard=[[btn("в—ЂпёЏ РќР°Р·Р°Рґ РІ РјРµРЅСЋ", "main_menu")]])
 
     if user and user["main_msg_id"]:
         try:
@@ -1286,14 +1327,14 @@ async def ref_cb(callback: CallbackQuery, bot: Bot):
     bot_info = await bot.get_me()
     ref_link = f"https://t.me/{bot_info.username}?start={user_id}"
     text = (
-        f"👥 *Заработать с FLEX VPN*\n\n"
-        f"Приглашай друзей и получай *{REF_BONUS_PERCENT}%* с их оплат на баланс.\n\n"
-        f"👤 Друзей приглашено: *{user['refs']}*\n"
-        f"🎯 Активировали пробный: *{user['ref_trials']}*\n"
-        f"💵 Заработано: *{user['ref_earned']}₽*\n\n"
-        f"🔗 *Ваша реферальная ссылка:*\n`{ref_link}`"
+        f"рџ‘Ґ *Р—Р°СЂР°Р±РѕС‚Р°С‚СЊ СЃ FLEX VPN*\n\n"
+        f"РџСЂРёРіР»Р°С€Р°Р№ РґСЂСѓР·РµР№ Рё РїРѕР»СѓС‡Р°Р№ *{REF_BONUS_PERCENT}%* СЃ РёС… РѕРїР»Р°С‚ РЅР° Р±Р°Р»Р°РЅСЃ.\n\n"
+        f"рџ‘¤ Р”СЂСѓР·РµР№ РїСЂРёРіР»Р°С€РµРЅРѕ: *{user['refs']}*\n"
+        f"рџЋЇ РђРєС‚РёРІРёСЂРѕРІР°Р»Рё РїСЂРѕР±РЅС‹Р№: *{user['ref_trials']}*\n"
+        f"рџ’µ Р—Р°СЂР°Р±РѕС‚Р°РЅРѕ: *{user['ref_earned']}в‚Ѕ*\n\n"
+        f"рџ”— *Р’Р°С€Р° СЂРµС„РµСЂР°Р»СЊРЅР°СЏ СЃСЃС‹Р»РєР°:*\n`{ref_link}`"
     )
-    kb = InlineKeyboardMarkup(inline_keyboard=[[btn("◀️ Назад в меню", "main_menu")]])
+    kb = InlineKeyboardMarkup(inline_keyboard=[[btn("в—ЂпёЏ РќР°Р·Р°Рґ РІ РјРµРЅСЋ", "main_menu")]])
     await safe_edit(callback.message, text, reply_markup=kb)
     await callback.answer()
 
@@ -1302,7 +1343,7 @@ async def ref_cb(callback: CallbackQuery, bot: Bot):
 async def docs_cb(callback: CallbackQuery):
     await safe_edit(
         callback.message,
-        "📄 *Документы FLEX VPN*\n\nВся документация сервиса всегда в открытом доступе.\n\n📌 Служба поддержки: @takurwa",
+        "рџ“„ *Р”РѕРєСѓРјРµРЅС‚С‹ FLEX VPN*\n\nР’СЃСЏ РґРѕРєСѓРјРµРЅС‚Р°С†РёСЏ СЃРµСЂРІРёСЃР° РІСЃРµРіРґР° РІ РѕС‚РєСЂС‹С‚РѕРј РґРѕСЃС‚СѓРїРµ.\n\nрџ“Њ РЎР»СѓР¶Р±Р° РїРѕРґРґРµСЂР¶РєРё: @takurwa",
         reply_markup=get_docs_menu(),
     )
     await callback.answer()
@@ -1311,26 +1352,26 @@ async def docs_cb(callback: CallbackQuery):
 @router.callback_query(F.data == "bot_policy")
 async def bot_policy_cb(callback: CallbackQuery):
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🛡 Политика конфиденциальности ↗", url="https://telegra.ph/POLITIKA-KONFIDENCIALNOSTI-08-12-99")],
-        [btn("◀️ Назад", "docs")],
+        [InlineKeyboardButton(text="рџ›Ў РџРѕР»РёС‚РёРєР° РєРѕРЅС„РёРґРµРЅС†РёР°Р»СЊРЅРѕСЃС‚Рё в†—", url="https://telegra.ph/POLITIKA-KONFIDENCIALNOSTI-08-12-99")],
+        [btn("в—ЂпёЏ РќР°Р·Р°Рґ", "docs")],
     ])
     await safe_edit(
         callback.message,
-        "🔒 *Политика бота FLEX VPN*\n\n"
-        "• Бот собирает только необходимые данные\n"
-        "• Данные не передаются третьим лицам\n"
-        "• Используются исключительно для предоставления услуг VPN\n"
-        "• Запрос на удаление данных: @takurwa",
+        "рџ”’ *РџРѕР»РёС‚РёРєР° Р±РѕС‚Р° FLEX VPN*\n\n"
+        "вЂў Р‘РѕС‚ СЃРѕР±РёСЂР°РµС‚ С‚РѕР»СЊРєРѕ РЅРµРѕР±С…РѕРґРёРјС‹Рµ РґР°РЅРЅС‹Рµ\n"
+        "вЂў Р”Р°РЅРЅС‹Рµ РЅРµ РїРµСЂРµРґР°СЋС‚СЃСЏ С‚СЂРµС‚СЊРёРј Р»РёС†Р°Рј\n"
+        "вЂў РСЃРїРѕР»СЊР·СѓСЋС‚СЃСЏ РёСЃРєР»СЋС‡РёС‚РµР»СЊРЅРѕ РґР»СЏ РїСЂРµРґРѕСЃС‚Р°РІР»РµРЅРёСЏ СѓСЃР»СѓРі VPN\n"
+        "вЂў Р—Р°РїСЂРѕСЃ РЅР° СѓРґР°Р»РµРЅРёРµ РґР°РЅРЅС‹С…: @takurwa",
         reply_markup=kb,
     )
     await callback.answer()
 
 
-# ───────────────────────── АДМИН ─────────────────────────
+# в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ РђР”РњРРќ в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
 
 async def admin_ask(callback: CallbackQuery, state: FSMContext, text: str, next_state):
     if not is_admin(callback.from_user):
-        await callback.answer("⛔ Нет доступа.", show_alert=True)
+        await callback.answer("в›” РќРµС‚ РґРѕСЃС‚СѓРїР°.", show_alert=True)
         return
     await safe_edit(callback.message, text)
     await state.set_state(next_state)
@@ -1339,7 +1380,7 @@ async def admin_ask(callback: CallbackQuery, state: FSMContext, text: str, next_
 
 @router.callback_query(F.data == "admin_give")
 async def admin_give_cb(callback: CallbackQuery, state: FSMContext):
-    await admin_ask(callback, state, "💸 Введите *@username* пользователя:", Form.admin_give_username)
+    await admin_ask(callback, state, "рџ’ё Р’РІРµРґРёС‚Рµ *@username* РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ:", Form.admin_give_username)
 
 
 @router.message(Form.admin_give_username)
@@ -1357,7 +1398,7 @@ async def admin_give_username_handler(message: Message, state: FSMContext, bot: 
         if admin_user and admin_user["main_msg_id"]:
             try:
                 await bot.edit_message_text(
-                    f"❌ Пользователь @{username} не найден.\n\nВведите другой username:",
+                    f"вќЊ РџРѕР»СЊР·РѕРІР°С‚РµР»СЊ @{username} РЅРµ РЅР°Р№РґРµРЅ.\n\nР’РІРµРґРёС‚Рµ РґСЂСѓРіРѕР№ username:",
                     chat_id=message.chat.id,
                     message_id=admin_user["main_msg_id"],
                     parse_mode="Markdown",
@@ -1369,7 +1410,7 @@ async def admin_give_username_handler(message: Message, state: FSMContext, bot: 
     if admin_user and admin_user["main_msg_id"]:
         try:
             await bot.edit_message_text(
-                f"✅ Найден: @{username}\n💰 Баланс: *{get_user(user['user_id'])['balance']}₽*\n\nВведите сумму (отрицательная — снятие):",
+                f"вњ… РќР°Р№РґРµРЅ: @{username}\nрџ’° Р‘Р°Р»Р°РЅСЃ: *{get_user(user['user_id'])['balance']}в‚Ѕ*\n\nР’РІРµРґРёС‚Рµ СЃСѓРјРјСѓ (РѕС‚СЂРёС†Р°С‚РµР»СЊРЅР°СЏ вЂ” СЃРЅСЏС‚РёРµ):",
                 chat_id=message.chat.id,
                 message_id=admin_user["main_msg_id"],
                 parse_mode="Markdown",
@@ -1392,7 +1433,7 @@ async def admin_give_amount_handler(message: Message, state: FSMContext, bot: Bo
         if amount == 0:
             raise ValueError
     except ValueError:
-        await bot.send_message(message.chat.id, "Введите число (не ноль):")
+        await bot.send_message(message.chat.id, "Р’РІРµРґРёС‚Рµ С‡РёСЃР»Рѕ (РЅРµ РЅРѕР»СЊ):")
         return
     data       = await state.get_data()
     target_id  = data["target_id"]
@@ -1405,7 +1446,7 @@ async def admin_give_amount_handler(message: Message, state: FSMContext, bot: Bo
     if admin_user and admin_user["main_msg_id"]:
         try:
             await bot.edit_message_text(
-                f"✅ @{target_un}: {sign}{amount}₽\n💰 Новый баланс: *{new_bal}₽*",
+                f"вњ… @{target_un}: {sign}{amount}в‚Ѕ\nрџ’° РќРѕРІС‹Р№ Р±Р°Р»Р°РЅСЃ: *{new_bal}в‚Ѕ*",
                 chat_id=message.chat.id,
                 message_id=admin_user["main_msg_id"],
                 reply_markup=get_admin_menu(),
@@ -1418,7 +1459,7 @@ async def admin_give_amount_handler(message: Message, state: FSMContext, bot: Bo
 
 @router.callback_query(F.data == "admin_give_sub")
 async def admin_give_sub_cb(callback: CallbackQuery, state: FSMContext):
-    await admin_ask(callback, state, "✅ Введите *@username* пользователя которому выдать подписку:", Form.admin_sub_username)
+    await admin_ask(callback, state, "вњ… Р’РІРµРґРёС‚Рµ *@username* РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ РєРѕС‚РѕСЂРѕРјСѓ РІС‹РґР°С‚СЊ РїРѕРґРїРёСЃРєСѓ:", Form.admin_sub_username)
 
 
 @router.message(Form.admin_sub_username)
@@ -1436,7 +1477,7 @@ async def admin_sub_username_handler(message: Message, state: FSMContext, bot: B
         if admin_user and admin_user["main_msg_id"]:
             try:
                 await bot.edit_message_text(
-                    f"❌ Пользователь @{username} не найден.\n\nВведите другой username:",
+                    f"вќЊ РџРѕР»СЊР·РѕРІР°С‚РµР»СЊ @{username} РЅРµ РЅР°Р№РґРµРЅ.\n\nР’РІРµРґРёС‚Рµ РґСЂСѓРіРѕР№ username:",
                     chat_id=message.chat.id,
                     message_id=admin_user["main_msg_id"],
                     parse_mode="Markdown",
@@ -1448,7 +1489,7 @@ async def admin_sub_username_handler(message: Message, state: FSMContext, bot: B
     if admin_user and admin_user["main_msg_id"]:
         try:
             await bot.edit_message_text(
-                f"✅ Найден: @{username}\n\nВведите количество *дней* подписки:",
+                f"вњ… РќР°Р№РґРµРЅ: @{username}\n\nР’РІРµРґРёС‚Рµ РєРѕР»РёС‡РµСЃС‚РІРѕ *РґРЅРµР№* РїРѕРґРїРёСЃРєРё:",
                 chat_id=message.chat.id,
                 message_id=admin_user["main_msg_id"],
                 parse_mode="Markdown",
@@ -1471,14 +1512,14 @@ async def admin_sub_days_handler(message: Message, state: FSMContext, bot: Bot):
         if days <= 0:
             raise ValueError
     except ValueError:
-        await bot.send_message(message.chat.id, "Введите положительное число дней:")
+        await bot.send_message(message.chat.id, "Р’РІРµРґРёС‚Рµ РїРѕР»РѕР¶РёС‚РµР»СЊРЅРѕРµ С‡РёСЃР»Рѕ РґРЅРµР№:")
         return
     await state.update_data(sub_days=days)
     admin_user = get_user(message.from_user.id)
     if admin_user and admin_user["main_msg_id"]:
         try:
             await bot.edit_message_text(
-                f"Дней: *{days}*\n\nВведите количество *устройств*:",
+                f"Р”РЅРµР№: *{days}*\n\nР’РІРµРґРёС‚Рµ РєРѕР»РёС‡РµСЃС‚РІРѕ *СѓСЃС‚СЂРѕР№СЃС‚РІ*:",
                 chat_id=message.chat.id,
                 message_id=admin_user["main_msg_id"],
                 parse_mode="Markdown",
@@ -1501,7 +1542,7 @@ async def admin_sub_devices_handler(message: Message, state: FSMContext, bot: Bo
         if devices <= 0:
             raise ValueError
     except ValueError:
-        await bot.send_message(message.chat.id, "Введите положительное число:")
+        await bot.send_message(message.chat.id, "Р’РІРµРґРёС‚Рµ РїРѕР»РѕР¶РёС‚РµР»СЊРЅРѕРµ С‡РёСЃР»Рѕ:")
         return
 
     data       = await state.get_data()
@@ -1513,7 +1554,7 @@ async def admin_sub_devices_handler(message: Message, state: FSMContext, bot: Bo
     if admin_user and admin_user["main_msg_id"]:
         try:
             await bot.edit_message_text(
-                "⏳ Создаём подписку...",
+                "вЏі РЎРѕР·РґР°С‘Рј РїРѕРґРїРёСЃРєСѓ...",
                 chat_id=message.chat.id,
                 message_id=admin_user["main_msg_id"],
             )
@@ -1526,7 +1567,7 @@ async def admin_sub_devices_handler(message: Message, state: FSMContext, bot: Bo
         if admin_user and admin_user["main_msg_id"]:
             try:
                 await bot.edit_message_text(
-                    "❌ Ошибка при создании подписки в H1VLESS.",
+                    "вќЊ РћС€РёР±РєР° РїСЂРё СЃРѕР·РґР°РЅРёРё РїРѕРґРїРёСЃРєРё РІ H1VLESS.",
                     chat_id=message.chat.id,
                     message_id=admin_user["main_msg_id"],
                     reply_markup=get_admin_menu(),
@@ -1537,17 +1578,17 @@ async def admin_sub_devices_handler(message: Message, state: FSMContext, bot: Bo
         return
 
     expire_date = calc_expire_date(target_id, days)
-    set_sub(target_id, f"Админ ({days}д, {devices}уст.)", expire_date.strftime("%d.%m.%Y %H:%M"), vless_key or "", sub_link)
+    set_sub(target_id, f"РђРґРјРёРЅ ({days}Рґ, {devices}СѓСЃС‚.)", expire_date.strftime("%d.%m.%Y %H:%M"), vless_key or "", sub_link)
     reset_notifications(target_id)
     key_text = format_key_text(vless_key, sub_link)
 
     if admin_user and admin_user["main_msg_id"]:
         try:
             await bot.edit_message_text(
-                f"✅ Подписка выдана @{target_un}!\n\n"
-                f"📅 Дней: *{days}*\n"
-                f"📱 Устройств: *{devices}*\n"
-                f"⏳ До: *{expire_date.strftime('%d.%m.%Y')}*\n\n"
+                f"вњ… РџРѕРґРїРёСЃРєР° РІС‹РґР°РЅР° @{target_un}!\n\n"
+                f"рџ“… Р”РЅРµР№: *{days}*\n"
+                f"рџ“± РЈСЃС‚СЂРѕР№СЃС‚РІ: *{devices}*\n"
+                f"вЏі Р”Рѕ: *{expire_date.strftime('%d.%m.%Y')}*\n\n"
                 f"{key_text}",
                 chat_id=message.chat.id,
                 message_id=admin_user["main_msg_id"],
@@ -1561,7 +1602,7 @@ async def admin_sub_devices_handler(message: Message, state: FSMContext, bot: Bo
 
 @router.callback_query(F.data == "admin_del_sub")
 async def admin_del_sub_cb(callback: CallbackQuery, state: FSMContext):
-    await admin_ask(callback, state, "❌ Введите *@username* пользователя у которого удалить подписку:", Form.admin_del_username)
+    await admin_ask(callback, state, "вќЊ Р’РІРµРґРёС‚Рµ *@username* РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ Сѓ РєРѕС‚РѕСЂРѕРіРѕ СѓРґР°Р»РёС‚СЊ РїРѕРґРїРёСЃРєСѓ:", Form.admin_del_username)
 
 
 @router.message(Form.admin_del_username)
@@ -1580,7 +1621,7 @@ async def admin_del_username_handler(message: Message, state: FSMContext, bot: B
         if admin_user and admin_user["main_msg_id"]:
             try:
                 await bot.edit_message_text(
-                    f"❌ Пользователь @{username} не найден.",
+                    f"вќЊ РџРѕР»СЊР·РѕРІР°С‚РµР»СЊ @{username} РЅРµ РЅР°Р№РґРµРЅ.",
                     chat_id=message.chat.id,
                     message_id=admin_user["main_msg_id"],
                     reply_markup=get_admin_menu(),
@@ -1594,12 +1635,12 @@ async def admin_del_username_handler(message: Message, state: FSMContext, bot: B
     deleted   = await h1_delete_client(target_id)
     clear_sub(target_id)
     reset_notifications(target_id)
-    status    = "✅ Удалено" if deleted else "⚠️ Клиент не найден в H1VLESS (БД очищена)"
+    status    = "вњ… РЈРґР°Р»РµРЅРѕ" if deleted else "вљ пёЏ РљР»РёРµРЅС‚ РЅРµ РЅР°Р№РґРµРЅ РІ H1VLESS (Р‘Р” РѕС‡РёС‰РµРЅР°)"
 
     if admin_user and admin_user["main_msg_id"]:
         try:
             await bot.edit_message_text(
-                f"{status}\n🗑 Подписка @{username} удалена.",
+                f"{status}\nрџ—‘ РџРѕРґРїРёСЃРєР° @{username} СѓРґР°Р»РµРЅР°.",
                 chat_id=message.chat.id,
                 message_id=admin_user["main_msg_id"],
                 reply_markup=get_admin_menu(),
@@ -1612,7 +1653,7 @@ async def admin_del_username_handler(message: Message, state: FSMContext, bot: B
 
 @router.callback_query(F.data == "admin_change_dev")
 async def admin_change_dev_cb(callback: CallbackQuery, state: FSMContext):
-    await admin_ask(callback, state, "📱 Введите *@username* пользователя:", Form.admin_dev_username)
+    await admin_ask(callback, state, "рџ“± Р’РІРµРґРёС‚Рµ *@username* РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ:", Form.admin_dev_username)
 
 
 @router.message(Form.admin_dev_username)
@@ -1630,7 +1671,7 @@ async def admin_dev_username_handler(message: Message, state: FSMContext, bot: B
         if admin_user and admin_user["main_msg_id"]:
             try:
                 await bot.edit_message_text(
-                    f"❌ Пользователь @{username} не найден.\n\nВведите другой username:",
+                    f"вќЊ РџРѕР»СЊР·РѕРІР°С‚РµР»СЊ @{username} РЅРµ РЅР°Р№РґРµРЅ.\n\nР’РІРµРґРёС‚Рµ РґСЂСѓРіРѕР№ username:",
                     chat_id=message.chat.id,
                     message_id=admin_user["main_msg_id"],
                     parse_mode="Markdown",
@@ -1642,7 +1683,7 @@ async def admin_dev_username_handler(message: Message, state: FSMContext, bot: B
     if admin_user and admin_user["main_msg_id"]:
         try:
             await bot.edit_message_text(
-                f"✅ Найден: @{username}\n\nВведите новое количество устройств:",
+                f"вњ… РќР°Р№РґРµРЅ: @{username}\n\nР’РІРµРґРёС‚Рµ РЅРѕРІРѕРµ РєРѕР»РёС‡РµСЃС‚РІРѕ СѓСЃС‚СЂРѕР№СЃС‚РІ:",
                 chat_id=message.chat.id,
                 message_id=admin_user["main_msg_id"],
                 parse_mode="Markdown",
@@ -1665,7 +1706,7 @@ async def admin_dev_count_handler(message: Message, state: FSMContext, bot: Bot)
         if devices <= 0:
             raise ValueError
     except ValueError:
-        await bot.send_message(message.chat.id, "Введите положительное число:")
+        await bot.send_message(message.chat.id, "Р’РІРµРґРёС‚Рµ РїРѕР»РѕР¶РёС‚РµР»СЊРЅРѕРµ С‡РёСЃР»Рѕ:")
         return
 
     data       = await state.get_data()
@@ -1675,9 +1716,9 @@ async def admin_dev_count_handler(message: Message, state: FSMContext, bot: Bot)
     success    = await h1_update_devices(target_id, devices)
 
     result = (
-        f"✅ У @{target_un} установлен лимит *{devices}* устройств."
+        f"вњ… РЈ @{target_un} СѓСЃС‚Р°РЅРѕРІР»РµРЅ Р»РёРјРёС‚ *{devices}* СѓСЃС‚СЂРѕР№СЃС‚РІ."
         if success else
-        f"❌ Не удалось изменить — клиент не найден в H1VLESS."
+        f"вќЊ РќРµ СѓРґР°Р»РѕСЃСЊ РёР·РјРµРЅРёС‚СЊ вЂ” РєР»РёРµРЅС‚ РЅРµ РЅР°Р№РґРµРЅ РІ H1VLESS."
     )
 
     if admin_user and admin_user["main_msg_id"]:
@@ -1696,7 +1737,7 @@ async def admin_dev_count_handler(message: Message, state: FSMContext, bot: Bot)
 
 @router.callback_query(F.data == "admin_create_promo")
 async def admin_create_promo_cb(callback: CallbackQuery, state: FSMContext):
-    await admin_ask(callback, state, "🎫 Введите *код* промокода (например: FLEX2024):", Form.admin_promo_code)
+    await admin_ask(callback, state, "рџЋ« Р’РІРµРґРёС‚Рµ *РєРѕРґ* РїСЂРѕРјРѕРєРѕРґР° (РЅР°РїСЂРёРјРµСЂ: FLEX2024):", Form.admin_promo_code)
 
 
 @router.message(Form.admin_promo_code)
@@ -1713,7 +1754,7 @@ async def admin_promo_code_handler(message: Message, state: FSMContext, bot: Bot
     if admin_user and admin_user["main_msg_id"]:
         try:
             await bot.edit_message_text(
-                f"Код: *{code}*\n\nВведите *сумму* (в рублях):",
+                f"РљРѕРґ: *{code}*\n\nР’РІРµРґРёС‚Рµ *СЃСѓРјРјСѓ* (РІ СЂСѓР±Р»СЏС…):",
                 chat_id=message.chat.id,
                 message_id=admin_user["main_msg_id"],
                 parse_mode="Markdown",
@@ -1736,14 +1777,14 @@ async def admin_promo_amount_handler(message: Message, state: FSMContext, bot: B
         if amount <= 0:
             raise ValueError
     except ValueError:
-        await bot.send_message(message.chat.id, "Введите положительное число:")
+        await bot.send_message(message.chat.id, "Р’РІРµРґРёС‚Рµ РїРѕР»РѕР¶РёС‚РµР»СЊРЅРѕРµ С‡РёСЃР»Рѕ:")
         return
     await state.update_data(promo_amount=amount)
     admin_user = get_user(message.from_user.id)
     if admin_user and admin_user["main_msg_id"]:
         try:
             await bot.edit_message_text(
-                "Введите *количество использований* (например: 1 или 100):",
+                "Р’РІРµРґРёС‚Рµ *РєРѕР»РёС‡РµСЃС‚РІРѕ РёСЃРїРѕР»СЊР·РѕРІР°РЅРёР№* (РЅР°РїСЂРёРјРµСЂ: 1 РёР»Рё 100):",
                 chat_id=message.chat.id,
                 message_id=admin_user["main_msg_id"],
                 parse_mode="Markdown",
@@ -1766,7 +1807,7 @@ async def admin_promo_uses_handler(message: Message, state: FSMContext, bot: Bot
         if uses <= 0:
             raise ValueError
     except ValueError:
-        await bot.send_message(message.chat.id, "Введите положительное число:")
+        await bot.send_message(message.chat.id, "Р’РІРµРґРёС‚Рµ РїРѕР»РѕР¶РёС‚РµР»СЊРЅРѕРµ С‡РёСЃР»Рѕ:")
         return
 
     data       = await state.get_data()
@@ -1778,10 +1819,10 @@ async def admin_promo_uses_handler(message: Message, state: FSMContext, bot: Bot
     if admin_user and admin_user["main_msg_id"]:
         try:
             await bot.edit_message_text(
-                f"✅ Промокод создан!\n\n"
-                f"🎫 Код: *{code}*\n"
-                f"💰 Сумма: *{amount}₽*\n"
-                f"🔢 Использований: *{uses}*",
+                f"вњ… РџСЂРѕРјРѕРєРѕРґ СЃРѕР·РґР°РЅ!\n\n"
+                f"рџЋ« РљРѕРґ: *{code}*\n"
+                f"рџ’° РЎСѓРјРјР°: *{amount}в‚Ѕ*\n"
+                f"рџ”ў РСЃРїРѕР»СЊР·РѕРІР°РЅРёР№: *{uses}*",
                 chat_id=message.chat.id,
                 message_id=admin_user["main_msg_id"],
                 reply_markup=get_admin_menu(),
@@ -1792,7 +1833,7 @@ async def admin_promo_uses_handler(message: Message, state: FSMContext, bot: Bot
     await state.clear()
 
 
-# ───────────────────────── ЗАПУСК ─────────────────────────
+# в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ Р—РђРџРЈРЎРљ в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
 
 async def main():
     logging.basicConfig(level=logging.INFO)
@@ -1808,3 +1849,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
