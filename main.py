@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 import sqlite3
 import aiohttp
 from datetime import datetime, timedelta
@@ -11,12 +12,12 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import CallbackQuery, ErrorEvent, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
-API_TOKEN      = "8830122855:AAG9i1bjXLIqNqvdpDvMYCNS2xDb_SQKDbc"
-ADMIN_USERNAME = "takurwa"
+API_TOKEN      = os.environ["TELEGRAM_BOT_TOKEN"]
+ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "takurwa")
 
-H1_API_URL   = "http://lt1.h1cloud.net:25392/api"
-H1_API_TOKEN = "f5bdf81dd2f8499dbc0f3c059f547b2b6025470947b84a3fb3e251325b9cb6d5"
-H1_INBOUND   = "custom-vless-25393"
+H1_API_URL   = os.getenv("H1_API_URL", "http://lt1.h1cloud.net:25392/api")
+H1_API_TOKEN = os.environ["H1_API_TOKEN"]
+H1_INBOUND   = os.getenv("H1_INBOUND", "custom-vless-25393")
 
 router = Router()
 
